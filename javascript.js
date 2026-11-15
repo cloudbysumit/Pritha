@@ -1,45 +1,44 @@
-macro "Automatic Lipid Droplet Circles" {
+macro "Automatic Lipid Droplet Circles (ring based)" {
 
     if (nImages == 0)
         exit("Open a fluorescence image first.");
 
-    original   = getTitle();
     originalID = getImageID();
 
     // -------------------------------
     // USER SETTINGS
     // -------------------------------
 
-    Dialog.create("Lipid Droplet Detection");
+    Dialog.create("Lipid Droplet Detection (ring based)");
 
-    Dialog.addNumber("Typical droplet diameter (pixels)", 20);
-    Dialog.addNumber("Detection threshold (% of max, lower = more droplets)", 20);
+    Dialog.addNumber("Blur sigma (pixels)", 1);
+    Dialog.addNumber("Local threshold radius (pixels, ~ droplet diameter)", 20);
+    Dialog.addNumber("Local threshold offset (higher = stricter)", 0);
     Dialog.addNumber("Minimum droplet area (pixels)", 40);
     Dialog.addNumber("Maximum droplet area (pixels)", 1200);
-    Dialog.addNumber("Minimum circularity (0-1)", 0.55);
+    Dialog.addNumber("Minimum circularity (0-1)", 0.70);
+    Dialog.addNumber("Min contrast (inside / surround)", 1.15);
     Dialog.addCheckbox("Apply watershed", true);
-    Dialog.addCheckbox("Draw ROIs as fitted circles", true);
+    Dialog.addCheckbox("Draw ROIs as fitted circles", false);
 
     Dialog.show();
 
-    diameter  = Dialog.getNumber();
-    thrPct    = Dialog.getNumber();
+    sigma     = Dialog.getNumber();
+    locRadius = Dialog.getNumber();
+    locOffset = Dialog.getNumber();
     minArea   = Dialog.getNumber();
     maxArea   = Dialog.getNumber();
     minCirc   = Dialog.getNumber();
+    minContr  = Dialog.getNumber();
     watershed = Dialog.getCheckbox();
     fitCircle = Dialog.getCheckbox();
 
-    if (diameter <= 0 || thrPct <= 0 || thrPct >= 100 ||
-        minArea < 0 || maxArea <= minArea ||
-        minCirc < 0 || minCirc > 1)
+    if (locRadius <= 0 || minArea < 0 || maxArea <= minArea ||
+        minCirc < 0 || minCirc > 1 || sigma < 0)
         exit("Check your parameters.");
 
-    sigmaSmall = diameter / 4;   // fills ring-shaped droplets into blobs
-    sigmaBig   = diameter;       // estimates the cytoplasm background
-
     // -------------------------------
-    // SEGMENTATION (band-pass to keep droplet-sized objects only)
+    // SEGMENTATION
     // -------------------------------
 
     selectImage(originalID);
@@ -47,51 +46,49 @@ macro "Automatic Lipid Droplet Circles" {
     // Duplicate ONLY the currently displayed channel / z / t plane
     if (is("hyperstack")) {
         Stack.getPosition(c, z, t);
-        run("Duplicate...", "title=LD_MASK duplicate channels=" + c +
+        run("Duplicate...", "title=LD_A duplicate channels=" + c +
             " slices=" + z + " frames=" + t);
     } else {
-        run("Duplicate...", "title=LD_MASK");
+        run("Duplicate...", "title=LD_A");
     }
 
-    selectWindow("LD_MASK");
-    run("32-bit");
-    run("Duplicate...", "title=LD_BIG");
-
-    selectWindow("LD_MASK");
-    run("Gaussian Blur...", "sigma=" + sigmaSmall);
-
-    selectWindow("LD_BIG");
-    run("Gaussian Blur...", "sigma=" + sigmaBig);
-
-    // Difference of Gaussians: droplets stay, smooth cytoplasm cancels out
-    imageCalculator("Subtract 32-bit", "LD_MASK", "LD_BIG");
-
-    selectWindow("LD_BIG");
-    close();
-
-    selectWindow("LD_MASK");
-    getStatistics(area, mean, min, max);
-
-    if (max <= 0) {
-        close();
-        exit("No droplet-sized structures found. Check droplet diameter.");
-    }
-
-    // Scale positive signal to 0-255, then threshold as % of max
-    setMinAndMax(0, max);
+    selectWindow("LD_A");
     run("8-bit");
+    if (sigma > 0)
+        run("Gaussian Blur...", "sigma=" + sigma);
 
+    // Copy B: local threshold (keeps rings that are brighter than their surroundings)
+    run("Duplicate...", "title=LD_B");
+    selectWindow("LD_B");
+    run("Auto Local Threshold",
+        "method=Mean radius=" + locRadius +
+        " parameter_1=" + locOffset + " parameter_2=0 white");
+
+    // Copy A: global floor, so dark background noise is ignored
+    selectWindow("LD_A");
     setOption("BlackBackground", true);
-    setThreshold(round(255 * thrPct / 100), 255);
+    setAutoThreshold("Triangle dark");
     run("Convert to Mask");
 
-    run("Fill Holes");
+    // Keep only pixels that pass BOTH tests
+    imageCalculator("AND create", "LD_A", "LD_B");
+    rename("LD_MASK");
+
+    selectWindow("LD_A"); close();
+    selectWindow("LD_B"); close();
+
+    selectWindow("LD_MASK");
+    setOption("BlackBackground", true);
+
+    run("Close-");        // close small gaps in rings
+    run("Fill Holes");    // closed rings -> solid discs
+    run("Open");          // remove thin leftovers
 
     if (watershed)
         run("Watershed");
 
     // -------------------------------
-    // DETECT DROPLETS
+    // DETECT ROUND OBJECTS
     // -------------------------------
 
     roiManager("Reset");
@@ -99,21 +96,48 @@ macro "Automatic Lipid Droplet Circles" {
     run("Analyze Particles...",
         "size=" + minArea + "-" + maxArea + " pixel" +
         " circularity=" + minCirc + "-1.00" +
-        " show=Nothing add");
-
-    n = roiManager("Count");
+        " show=Nothing exclude add");
 
     selectWindow("LD_MASK");
     close();
 
+    n = roiManager("Count");
     if (n == 0)
-        exit("No droplets detected. Lower the threshold %, minimum circularity or minimum area.");
+        exit("No droplets detected. Lower circularity, offset or minimum area.");
 
     // -------------------------------
-    // MAKE ROIs ROUND AND NAME THEM
+    // CONTRAST FILTER (droplet must be brighter than its surround)
     // -------------------------------
 
     selectImage(originalID);
+
+    for (i = n - 1; i >= 0; i--) {
+
+        roiManager("Select", i);
+        inMean = getValue("Mean");
+        inArea = getValue("Area");
+
+        run("Enlarge...", "enlarge=4 pixel");
+        bigMean = getValue("Mean");
+        bigArea = getValue("Area");
+
+        surround = (bigMean * bigArea - inMean * inArea) / (bigArea - inArea);
+
+        if (surround <= 0 || inMean / surround < minContr) {
+            roiManager("Select", i);
+            roiManager("Delete");
+        }
+    }
+
+    run("Select None");
+
+    n = roiManager("Count");
+    if (n == 0)
+        exit("All objects were rejected by the contrast filter. Lower 'Min contrast'.");
+
+    // -------------------------------
+    // NAME (AND OPTIONALLY ROUND) THE ROIs
+    // -------------------------------
 
     for (i = 0; i < n; i++) {
         roiManager("Select", i);
@@ -138,7 +162,7 @@ macro "Automatic Lipid Droplet Circles" {
     roiManager("Measure");
 
     // -------------------------------
-    // DISPLAY FINAL ROIs
+    // DISPLAY
     // -------------------------------
 
     roiManager("Deselect");
@@ -146,8 +170,7 @@ macro "Automatic Lipid Droplet Circles" {
     roiManager("Set Color", "yellow");
     roiManager("Set Line Width", 1);
 
-    print("Lipid droplet analysis completed.");
-    print("Detected droplets: " + n);
+    print("Droplets detected: " + n);
 
     showMessage("Analysis completed",
         "Droplets detected: " + n +
