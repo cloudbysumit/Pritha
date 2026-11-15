@@ -68,7 +68,6 @@ macro "Automatic Lipid Droplet Circles (circle search)" {
     // -------------------------------
     // RING RESPONSE FOR EVERY RADIUS
     // response = mean(ring band) - mean(inner + outer comparison bands)
-    // thin bright rings give a strong response; smooth haze and plain edges give ~0
     // -------------------------------
 
     nR = floor((rMax - rMin) / rStep) + 1;
@@ -237,7 +236,6 @@ macro "Automatic Lipid Droplet Circles (circle search)" {
 
     // -------------------------------
     // DRAW CIRCLES AS ROIs
-    // (circle covers the whole droplet, including the bright rim)
     // -------------------------------
 
     roiManager("Reset");
