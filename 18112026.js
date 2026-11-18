@@ -3,8 +3,10 @@ var gRingMean = 0;
 
 macro "Automatic Lipid Droplet Circles (circle search v4)" {
 
-    if (nImages == 0)
-        exit("Open a fluorescence image first.");
+    if (nImages == 0) {
+        path = File.openDialog("Gandu image select kar");
+        open(path);
+    }
 
     originalID = getImageID();
 
